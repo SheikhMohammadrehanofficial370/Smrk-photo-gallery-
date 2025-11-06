@@ -1,0 +1,476 @@
+# Smrk-photo-gallery-
+My photo gallery 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smrk</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, orderBy, onSnapshot, addDoc, serverTimestamp, deleteDoc, doc, updateDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        setLogLevel('Debug');
+
+        let db, auth, userId;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        
+        let currentSortOrder = 'newest'; // 'newest' or 'likes'
+
+        // 1. Firebase and Authentication Setup
+        try {
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            // Use Custom Token or Anonymous Sign-in
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                signInWithCustomToken(auth, __initial_auth_token)
+                    .then((userCredential) => {
+                        userId = userCredential.user.uid;
+                        document.getElementById('user-info').textContent = `User ID: ${userId}`;
+                        loadPhotos();
+                        console.log("Custom token sign-in successful.");
+                    })
+                    .catch((error) => {
+                        console.error("Custom token sign-in failed. Falling back to anonymous.", error);
+                        signInAnonymously(auth).then(userCredential => {
+                            userId = userCredential.user.uid;
+                            document.getElementById('user-info').textContent = `User ID: ${userId}`;
+                            loadPhotos();
+                        });
+                    });
+            } else {
+                signInAnonymously(auth).then(userCredential => {
+                    userId = userCredential.user.uid;
+                    document.getElementById('user-info').textContent = `User ID: ${userId}`;
+                    loadPhotos();
+                }).catch(error => {
+                    console.error("Anonymous sign-in failed:", error);
+                    loadPhotos();
+                });
+            }
+
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error);
+            showMessage('Sorry, there was an issue initializing Firebase. Check the console.', 'bg-red-500');
+        }
+        
+        // Public Collection Path
+        const PHOTOS_COLLECTION_PATH = `artifacts/${appId}/public/data/photos`;
+
+        // 2. Helper function to show messages
+        function showMessage(text, colorClass) {
+            const messageBox = document.getElementById('message-box');
+            messageBox.textContent = text;
+            messageBox.className = `p-3 mb-4 rounded-lg text-white font-medium ${colorClass} transition-all duration-300`;
+            setTimeout(() => {
+                messageBox.className = 'p-0 mb-0 rounded-lg text-white font-medium transition-all duration-300 h-0 overflow-hidden';
+            }, 5000);
+        }
+
+        // 3. Convert file to Base64 (for small files)
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                if (!file) {
+                    reject(new Error("No file selected."));
+                    return;
+                }
+                // Check file size (Firestore limit is 1MB, keeping buffer lower for safety)
+                const MAX_FILE_SIZE = 300 * 1024; // 300 KB
+                if (file.size > MAX_FILE_SIZE) {
+                    reject(new Error(`File size (${(file.size / 1024).toFixed(0)} KB) exceeds the safe limit (300 KB) for direct storage. Please use a smaller image or URL.`));
+                    return;
+                }
+
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = error => reject(error);
+                reader.readAsDataURL(file);
+            });
+        }
+
+
+        // 4. Save Photo to Firestore (Updated to handle File Input and optional Caption)
+        window.savePhoto = async function() {
+            const fileInput = document.getElementById('photo-file');
+            const urlInput = document.getElementById('photo-url');
+            const captionInput = document.getElementById('photo-caption');
+            
+            const caption = captionInput.value.trim();
+            const file = fileInput.files[0];
+            const url = urlInput.value.trim();
+
+            let finalUrl = '';
+            let isBase64 = false;
+
+            if (file) {
+                // Handle file upload (Base64)
+                if (url) {
+                    showMessage('Please upload a file OR use a URL, not both.', 'bg-yellow-500');
+                    return;
+                }
+                
+                try {
+                    finalUrl = await fileToBase64(file);
+                    isBase64 = true;
+                } catch (error) {
+                    console.error("Base64 Conversion Error:", error);
+                    showMessage(`Image error: ${error.message}`, 'bg-red-500');
+                    return;
+                }
+
+            } else if (url) {
+                // Handle URL input
+                finalUrl = url;
+                isBase64 = false;
+            } else {
+                // No file and no URL
+                showMessage('Please select an image file or provide an image URL.', 'bg-yellow-500');
+                return;
+            }
+
+            if (!db) {
+                showMessage('Database is not available.', 'bg-red-500');
+                return;
+            }
+            
+            const saveBtn = document.getElementById('save-button');
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+
+            try {
+                await addDoc(collection(db, PHOTOS_COLLECTION_PATH), {
+                    url: finalUrl, 
+                    caption: caption, // Caption is now optional (can be empty string)
+                    timestamp: serverTimestamp(),
+                    uploaderId: userId || 'anonymous',
+                    likes: {}, 
+                    comments: [],
+                    isBase64: isBase64 
+                });
+
+                showMessage('Photo successfully added to the gallery!', 'bg-green-500');
+                fileInput.value = ''; 
+                urlInput.value = '';
+                captionInput.value = '';
+
+            } catch (error) {
+                console.error("Error adding document: ", error);
+                showMessage('Error saving photo: ' + error.message, 'bg-red-500');
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.textContent = 'Add Photo';
+            }
+        }
+        
+        // 5. Edit Photo - Show Modal/Form
+        window.startEditPhoto = function(docId, currentCaption, currentUrl, isBase64) {
+            const modal = document.getElementById('edit-modal');
+            document.getElementById('edit-doc-id').value = docId;
+            document.getElementById('edit-caption').value = currentCaption;
+            
+            // Hide URL field for Base64, show error message instead
+            const urlGroup = document.getElementById('edit-url-group');
+            const base64Message = document.getElementById('edit-base64-message');
+            
+            if (isBase64) {
+                urlGroup.classList.add('hidden');
+                base64Message.classList.remove('hidden');
+                // For base64, only caption can be edited.
+            } else {
+                urlGroup.classList.remove('hidden');
+                base64Message.classList.add('hidden');
+                // Set URL value 
+                document.getElementById('edit-url').value = currentUrl;
+            }
+
+            modal.classList.remove('hidden');
+        }
+
+        // 6. Close Edit Modal
+        window.closeEditModal = function() {
+            document.getElementById('edit-modal').classList.add('hidden');
+        }
+
+        // 7. Update Photo in Firestore (Updated for optional Caption)
+        window.updatePhoto = async function() {
+            const docId = document.getElementById('edit-doc-id').value;
+            const newCaption = document.getElementById('edit-caption').value.trim(); // Can be empty
+            const photoRef = doc(db, PHOTOS_COLLECTION_PATH, docId);
+            
+            if (!db) {
+                showMessage('Database is not available.', 'bg-red-500');
+                return;
+            }
+            
+            const docSnap = await getDoc(photoRef);
+            const photoData = docSnap.data();
+            
+            // If it's Base64, we don't allow URL change here. Otherwise, get from input.
+            const newUrl = photoData.isBase64 ? photoData.url : document.getElementById('edit-url').value.trim();
+            
+            if (!newUrl) {
+                showMessage('URL/Image data cannot be empty.', 'bg-yellow-500');
+                return;
+            }
+            
+            const updateBtn = document.getElementById('update-button');
+            updateBtn.disabled = true;
+            updateBtn.textContent = 'Updating...';
+
+            try {
+                // Only allow uploader to update
+                if (!docSnap.exists() || photoData.uploaderId !== userId) {
+                    showMessage('You do not have permission to edit this photo.', 'bg-red-500');
+                    return;
+                }
+                
+                await updateDoc(photoRef, {
+                    caption: newCaption, // Caption can be empty string
+                    url: newUrl 
+                });
+
+                showMessage('Photo successfully updated!', 'bg-green-500');
+                closeEditModal();
+
+            } catch (error) {
+                console.error("Error updating document: ", error);
+                showMessage('Error updating photo: ' + error.message, 'bg-red-500');
+            } finally {
+                updateBtn.disabled = false;
+                updateBtn.textContent = 'Save Changes';
+            }
+        }
+        
+        // 8. Toggle Like (Same as before)
+        window.toggleLike = async function(docId) {
+            if (!db || !userId) {
+                showMessage('Database is not available for liking.', 'bg-red-500');
+                return;
+            }
+            
+            const likeButton = document.querySelector(`button[onclick="event.stopPropagation(); toggleLike('${docId}')"]`);
+            if (likeButton) likeButton.disabled = true;
+
+            try {
+                const photoRef = doc(db, PHOTOS_COLLECTION_PATH, docId);
+                const docSnap = await getDoc(photoRef); 
+
+                if (!docSnap.exists()) {
+                    showMessage('Photo not found.', 'bg-red-500');
+                    return;
+                }
+
+                const photoData = docSnap.data();
+                const currentLikes = photoData.likes || {};
+                const isLiked = !!currentLikes[userId];
+                
+                const newLikes = { ...currentLikes };
+
+                if (isLiked) {
+                    delete newLikes[userId];
+                    showMessage('Like removed!', 'bg-yellow-500');
+                } else {
+                    newLikes[userId] = true;
+                    showMessage('Photo liked!', 'bg-green-500');
+                }
+
+                await updateDoc(photoRef, {
+                    likes: newLikes
+                });
+
+            } catch (error) {
+                console.error("Error toggling like: ", error);
+                showMessage('Error toggling like: ' + error.message, 'bg-red-500');
+            } finally {
+                if (likeButton) likeButton.disabled = false;
+            }
+        }
+        
+        // 9. Add Comment (Same as before)
+        window.addComment = async function(docId) {
+            const input = document.getElementById(`comment-input-${docId}`);
+            const commentText = input.value.trim();
+
+            if (!db || !userId) {
+                showMessage('Database is not available for commenting.', 'bg-red-500');
+                return;
+            }
+
+            if (!commentText) {
+                showMessage('Please write a comment.', 'bg-yellow-500');
+                return;
+            }
+
+            try {
+                const photoRef = doc(db, PHOTOS_COLLECTION_PATH, docId);
+                const docSnap = await getDoc(photoRef); 
+
+                if (!docSnap.exists()) {
+                    showMessage('Photo not found.', 'bg-red-500');
+                    return;
+                }
+                
+                const photoData = docSnap.data();
+                const currentComments = photoData.comments || [];
+                
+                const newComment = {
+                    text: commentText,
+                    userId: userId,
+                    // Use ISO string timestamp for unique comment identification
+                    timestamp: new Date().toISOString() 
+                };
+
+                await updateDoc(photoRef, {
+                    comments: [...currentComments, newComment]
+                });
+
+                showMessage('Comment successfully added!', 'bg-green-500');
+                input.value = '';
+
+            } catch (error) {
+                console.error("Error adding comment: ", error);
+                showMessage('Error adding comment: ' + error.message, 'bg-red-500');
+            }
+        }
+        
+        // 10. Delete Comment (Same as before)
+        window.deleteComment = async function(docId, commentTimestamp, event) {
+            if (event) event.stopPropagation();
+
+            if (!db || !userId) {
+                showMessage('Database is not available for deleting comment.', 'bg-red-500');
+                return;
+            }
+
+            try {
+                const photoRef = doc(db, PHOTOS_COLLECTION_PATH, docId);
+                const docSnap = await getDoc(photoRef); 
+
+                if (!docSnap.exists()) {
+                    showMessage('Photo not found.', 'bg-red-500');
+                    return;
+                }
+                
+                const photoData = docSnap.data();
+                const currentComments = photoData.comments || [];
+                
+                let commentToDeleteIndex = -1;
+                
+                // Find the comment by timestamp
+                for (let i = 0; i < currentComments.length; i++) {
+                    const comment = currentComments[i];
+                    if (comment.timestamp === commentTimestamp) {
+                        // Check deletion permissions: commenter or photo uploader
+                        const isCommenter = comment.userId === userId;
+                        const isUploader = photoData.uploaderId === userId;
+
+                        if (isCommenter || isUploader) {
+                            commentToDeleteIndex = i;
+                            break;
+                        } else {
+                            // Comment found, but user lacks permission
+                            showMessage('You do not have permission to delete this comment.', 'bg-red-500');
+                            return;
+                        }
+                    }
+                }
+
+                if (commentToDeleteIndex !== -1) {
+                    // Remove comment from the Array
+                    const newComments = [...currentComments];
+                    newComments.splice(commentToDeleteIndex, 1);
+                    
+                    await updateDoc(photoRef, {
+                        comments: newComments
+                    });
+
+                    showMessage('Comment successfully deleted!', 'bg-green-500');
+                } else {
+                    showMessage('Comment not found.', 'bg-yellow-500');
+                }
+
+            } catch (error) {
+                console.error("Error deleting comment: ", error);
+                showMessage('Error deleting comment: ' + error.message, 'bg-red-500');
+            }
+        }
+
+        // 11. Delete Photo from Firestore (Same as before)
+        window.deletePhoto = async function(docId) {
+            if (!db) {
+                showMessage('Database is not available.', 'bg-red-500');
+                return;
+            }
+
+            try {
+                const photoRef = doc(db, PHOTOS_COLLECTION_PATH, docId);
+                const docSnap = await getDoc(photoRef); 
+
+                // Only allow uploader to delete
+                if (!docSnap.exists() || docSnap.data().uploaderId !== userId) {
+                    showMessage('This photo does not exist or you do not have permission to delete it.', 'bg-red-500');
+                    return;
+                }
+
+                await deleteDoc(photoRef);
+                showMessage('Photo successfully deleted!', 'bg-green-500');
+            } catch (error) {
+                console.error("Error deleting document: ", error);
+                showMessage('Error deleting photo: ' + error.message, 'bg-red-500');
+            }
+        }
+
+        // 12. Change Sorting Order (Same as before)
+        window.changeSort = function(order) {
+            currentSortOrder = order;
+            // Update button states in UI
+            document.getElementById('sort-newest').classList.remove('bg-indigo-600', 'text-white');
+            document.getElementById('sort-newest').classList.add('bg-gray-200', 'text-gray-700');
+            document.getElementById('sort-likes').classList.remove('bg-indigo-600', 'text-white');
+            document.getElementById('sort-likes').classList.add('bg-gray-200', 'text-gray-700');
+            
+            document.getElementById(`sort-${order}`).classList.remove('bg-gray-200', 'text-gray-700');
+            document.getElementById(`sort-${order}`).classList.add('bg-indigo-600', 'text-white');
+        }
+
+        // 13. Load Photo Gallery in Real-time (Same as before)
+        function loadPhotos() {
+            if (!db) return;
+
+            const gallery = document.getElementById('photo-gallery');
+            const photosRef = collection(db, PHOTOS_COLLECTION_PATH);
+
+            const q = query(photosRef, orderBy('timestamp', 'desc'));
+
+            onSnapshot(q, (snapshot) => {
+                
+                const photoArray = [];
+                snapshot.forEach((doc) => {
+                    photoArray.push({
+                        id: doc.id,
+                        ...doc.data()
+                    });
+                });
+                
+                // Client-side Sorting
+                const sortedPhotos = photoArray.sort((a, b) => {
+                    if (currentSortOrder === 'likes') {
+                        const likesA = a.likes ? Object.keys(a.likes).length : 0;
+                        const likesB = b.likes ? Object.keys(b.likes).length : 0;
+                        return likesB - likesA;
+                    } else { // 'newest'
+                        const timeA = a.timestamp ? a.timestamp.toDate().getTime() : 0;
+                        const timeB = b.timestamp ? b.timestamp.toDate().getTime() : 0;
+                        return timeB - timeA;
+                    }
+  
